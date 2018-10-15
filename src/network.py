@@ -1,143 +1,221 @@
-"""
-network.py
-~~~~~~~~~~
-
-A module to implement the stochastic gradient descent learning
-algorithm for a feedforward neural network.  Gradients are calculated
-using backpropagation.  Note that I have focused on making the code
-simple, easily readable, and easily modifiable.  It is not optimized,
-and omits many desirable features.
-"""
-
-#### Libraries
-# Standard library
+import json
 import random
-
-# Third-party libraries
+import sys
 import numpy as np
+import mnist_loader
 
+
+#定义二次方程函数
+class QuadraticCost(object):
+
+    @staticmethod
+    def fn(a, y):
+        return 0.5*np.linalg.norm(a-y)**2
+
+    @staticmethod
+    def delta(z, a, y):
+        return (a-y) * sigmoid_prime(z)
+
+
+#定义交叉熵代价函数
+class CrossEntropyCost(object):
+
+    @staticmethod
+    def fn(a, y):
+        return np.sum(np.nan_to_num(-y*np.log(a)-(1-y)*np.log(1-a)))
+
+    @staticmethod
+    def delta(z, a, y):
+        return (a-y)
+
+
+#### Main Network class
 class Network(object):
 
-    def __init__(self, sizes):
-        """The list ``sizes`` contains the number of neurons in the
-        respective layers of the network.  For example, if the list
-        was [2, 3, 1] then it would be a three-layer network, with the
-        first layer containing 2 neurons, the second layer 3 neurons,
-        and the third layer 1 neuron.  The biases and weights for the
-        network are initialized randomly, using a Gaussian
-        distribution with mean 0, and variance 1.  Note that the first
-        layer is assumed to be an input layer, and by convention we
-        won't set any biases for those neurons, since biases are only
-        ever used in computing the outputs from later layers."""
+    def __init__(self, sizes, cost=CrossEntropyCost):
+
         self.num_layers = len(sizes)
         self.sizes = sizes
-        self.biases = [np.random.randn(y, 1) for y in sizes[1:]]
+        self.default_weight_initializer()
+        self.cost=cost
+
+    def default_weight_initializer(self):
+        """左右挤压后的初始化权重"""
+        self.biases = [np.random.randn(y, 1) for y in self.sizes[1:]]
+        self.weights = [np.random.randn(y, x)/np.sqrt(x)
+                        for x, y in zip(self.sizes[:-1], self.sizes[1:])]
+
+    def large_weight_initializer(self):
+
+        self.biases = [np.random.randn(y, 1) for y in self.sizes[1:]]
         self.weights = [np.random.randn(y, x)
-                        for x, y in zip(sizes[:-1], sizes[1:])]
+                        for x, y in zip(self.sizes[:-1], self.sizes[1:])]
 
     def feedforward(self, a):
-        """Return the output of the network if ``a`` is input."""
+        """前向传播"""
         for b, w in zip(self.biases, self.weights):
             a = sigmoid(np.dot(w, a)+b)
         return a
 
     def SGD(self, training_data, epochs, mini_batch_size, eta,
-            test_data=None):
-        """Train the neural network using mini-batch stochastic
-        gradient descent.  The ``training_data`` is a list of tuples
-        ``(x, y)`` representing the training inputs and the desired
-        outputs.  The other non-optional parameters are
-        self-explanatory.  If ``test_data`` is provided then the
-        network will be evaluated against the test data after each
-        epoch, and partial progress printed out.  This is useful for
-        tracking progress, but slows things down substantially."""
-        if test_data: n_test = len(test_data)
-        n = len(training_data)
-        for j in xrange(epochs):
-            random.shuffle(training_data)
-            mini_batches = [
-                training_data[k:k+mini_batch_size]
-                for k in xrange(0, n, mini_batch_size)]
-            for mini_batch in mini_batches:
-                self.update_mini_batch(mini_batch, eta)
-            if test_data:
-                print "Epoch {0}: {1} / {2}".format(
-                    j, self.evaluate(test_data), n_test)
-            else:
-                print "Epoch {0} complete".format(j)
+            lmbda = 0.0,
+            evaluation_data=None,
+            monitor_evaluation_cost=False,
+            monitor_evaluation_accuracy=False,
+            monitor_training_cost=False,
+            monitor_training_accuracy=False):
+        """梯度下降算法"""
 
-    def update_mini_batch(self, mini_batch, eta):
-        """Update the network's weights and biases by applying
-        gradient descent using backpropagation to a single mini batch.
-        The ``mini_batch`` is a list of tuples ``(x, y)``, and ``eta``
-        is the learning rate."""
-        nabla_b = [np.zeros(b.shape) for b in self.biases]
+        if evaluation_data: n_data = len(evaluation_data)
+        n = len(training_data)
+        evaluation_cost, evaluation_accuracy = [], []
+        training_cost, training_accuracy = [], []
+        for j in range(epochs):
+            random.shuffle(training_data)   #打乱训练集列表内数据顺序
+            mini_batches = [                #mini_batches从头开始取，每次取mini_batch_size个，凑成一个列表
+                training_data[k:k+mini_batch_size]
+                for k in range(0, n, mini_batch_size)]
+            for mini_batch in mini_batches: #对mini_batches里的数据进行挨个学习训练
+                self.update_mini_batch( mini_batch, eta, lmbda, len(training_data))
+
+            print("第{}轮训练完成".format(j+1))
+            if monitor_training_cost:
+                cost = self.total_cost(training_data, lmbda, convert=False)
+                training_cost.append(cost)
+                print("训练数据集代价值: {}".format(cost))
+            if monitor_training_accuracy:
+                accuracy = self.accuracy(training_data, convert=True)
+                training_accuracy.append(accuracy)
+                print("训练数据集准确度: {} / {}".format(
+                    accuracy, n))
+            if monitor_evaluation_cost:
+                cost = self.total_cost(evaluation_data, lmbda, convert=True)
+                evaluation_cost.append(cost)
+                print("验证数据集代价值: {}".format(cost))
+            if monitor_evaluation_accuracy:
+                accuracy = self.accuracy(evaluation_data, convert=False)
+                evaluation_accuracy.append(accuracy)
+                print("验证数据集准确度: {} / {}".format(
+                    accuracy, n_data))
+            print("")
+        return evaluation_cost, evaluation_accuracy, \
+            training_cost, training_accuracy
+
+    def update_mini_batch(self, mini_batch, eta, lmbda, n):
+        ''''''
+        nabla_b = [np.zeros(b.shape) for b in self.biases]      #初始DNN中每一层的 △b,△w都为0
         nabla_w = [np.zeros(w.shape) for w in self.weights]
         for x, y in mini_batch:
-            delta_nabla_b, delta_nabla_w = self.backprop(x, y)
-            nabla_b = [nb+dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]
+            delta_nabla_b, delta_nabla_w = self.backprop(x, y)              #进行反向传播,获得 △b,△w
+            nabla_b = [nb+dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]   #把mini_batch中的每个 △b,△w分别加在一起
             nabla_w = [nw+dnw for nw, dnw in zip(nabla_w, delta_nabla_w)]
-        self.weights = [w-(eta/len(mini_batch))*nw
+        self.weights = [(1-eta*(lmbda/n))*w-(eta/len(mini_batch))*nw    #更新权重
                         for w, nw in zip(self.weights, nabla_w)]
-        self.biases = [b-(eta/len(mini_batch))*nb
+        self.biases = [b-(eta/len(mini_batch))*nb                       #更新阈值
                        for b, nb in zip(self.biases, nabla_b)]
 
     def backprop(self, x, y):
-        """Return a tuple ``(nabla_b, nabla_w)`` representing the
-        gradient for the cost function C_x.  ``nabla_b`` and
-        ``nabla_w`` are layer-by-layer lists of numpy arrays, similar
-        to ``self.biases`` and ``self.weights``."""
-        nabla_b = [np.zeros(b.shape) for b in self.biases]
+        """"""
+        nabla_b = [np.zeros(b.shape) for b in self.biases]      #初始DNN中每一层的 △b,△w都为0
         nabla_w = [np.zeros(w.shape) for w in self.weights]
-        # feedforward
-        activation = x
-        activations = [x] # list to store all the activations, layer by layer
-        zs = [] # list to store all the z vectors, layer by layer
+
+        # 前向传播
+        a = x
+        aList = [x] # 把每一层的“a”放在一个列表里
+        zList = [ ] # 把每一层的“z”放在一个列表里
         for b, w in zip(self.biases, self.weights):
-            z = np.dot(w, activation)+b
-            zs.append(z)
-            activation = sigmoid(z)
-            activations.append(activation)
-        # backward pass
-        delta = self.cost_derivative(activations[-1], y) * \
-            sigmoid_prime(zs[-1])
+            z = np.dot(w, a)+b
+            a = sigmoid(z)
+            zList.append(z)
+            aList.append(a)
+
+        # 反向传播
+        delta = (self.cost).delta(zList[-1], aList[-1], y)  #获得代价值“C”
         nabla_b[-1] = delta
-        nabla_w[-1] = np.dot(delta, activations[-2].transpose())
-        # Note that the variable l in the loop below is used a little
-        # differently to the notation in Chapter 2 of the book.  Here,
-        # l = 1 means the last layer of neurons, l = 2 is the
-        # second-last layer, and so on.  It's a renumbering of the
-        # scheme in the book, used here to take advantage of the fact
-        # that Python can use negative indices in lists.
-        for l in xrange(2, self.num_layers):
-            z = zs[-l]
-            sp = sigmoid_prime(z)
+        nabla_w[-1] = np.dot(delta, aList[-2].transpose())
+        for l in range(2, self.num_layers):
+            z = zList[-l]
+            sp = sigmoid_prime(z)   #逻辑函数，a对z的导
             delta = np.dot(self.weights[-l+1].transpose(), delta) * sp
             nabla_b[-l] = delta
-            nabla_w[-l] = np.dot(delta, activations[-l-1].transpose())
+            nabla_w[-l] = np.dot(delta, aList[-l-1].transpose())
         return (nabla_b, nabla_w)
 
-    def evaluate(self, test_data):
-        """Return the number of test inputs for which the neural
-        network outputs the correct result. Note that the neural
-        network's output is assumed to be the index of whichever
-        neuron in the final layer has the highest activation."""
-        test_results = [(np.argmax(self.feedforward(x)), y)
-                        for (x, y) in test_data]
-        return sum(int(x == y) for (x, y) in test_results)
+    def accuracy(self, data, convert=False):
+        """
+        """
+        if convert:
+            results = [(np.argmax(self.feedforward(x)), np.argmax(y))
+                        for (x, y) in data]
+        else:
+            results = [(np.argmax(self.feedforward(x)), y)
+                        for (x, y) in data]
+        return sum(x == y for (x, y) in results)
 
-    def cost_derivative(self, output_activations, y):
-        """Return the vector of partial derivatives \partial C_x /
-        \partial a for the output activations."""
-        return (output_activations-y)
+    def total_cost(self, data, lmbda, convert=False):
+        """
+        """
+        cost = 0.0
+        for x, y in data:
+            a = self.feedforward(x)
+            if convert: y = vectorized_result(y)
+            cost += self.cost.fn(a, y)/len(data)
+        cost += 0.5*(lmbda/len(data))*sum(
+            np.linalg.norm(w)**2 for w in self.weights)
+        return cost
 
-#### Miscellaneous functions
+    def save(self, filename):
+        """把神经网络的权重存储至文件"""
+        data = {"sizes": self.sizes,
+                "weights": [w.tolist() for w in self.weights],
+                "biases": [b.tolist() for b in self.biases],
+                "cost": str(self.cost.__name__)}
+        f = open(filename, "w")
+        json.dump(data, f)
+        f.close()
+
+def load(filename):
+    """加载已有的神经网络"""
+    f = open(filename, "r")
+    data = json.load(f)
+    f.close()
+    cost = getattr(sys.modules[__name__], data["cost"])
+    net = Network(data["sizes"], cost=cost)
+    net.weights = [np.array(w) for w in data["weights"]]
+    net.biases = [np.array(b) for b in data["biases"]]
+    return net
+
+def vectorized_result(j):
+    """ 把数字向量化"""
+    e = np.zeros((10, 1))
+    e[j] = 1.0
+    return e
+
 def sigmoid(z):
-    """The sigmoid function."""
+    """逻辑函数"""
     return 1.0/(1.0+np.exp(-z))
 
 def sigmoid_prime(z):
-    """Derivative of the sigmoid function."""
+    """逻辑函数的导"""
     return sigmoid(z)*(1-sigmoid(z))
 
 
+
+training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
+# network = Network([784,30,10])
+# network.SGD(training_data, 20, 50, 0.01,
+#             lmbda = 0.0,
+#             evaluation_data=test_data,
+#             monitor_evaluation_cost=True,
+#             monitor_evaluation_accuracy=True,
+#             monitor_training_cost=True,
+#             monitor_training_accuracy=True)
+# network.save("data\module")
+module = load("data\module")
+module.SGD(training_data, 30, 50, 0.01,
+            lmbda = 0.0,
+            evaluation_data=test_data,
+            monitor_evaluation_cost=True,
+            monitor_evaluation_accuracy=True,
+            monitor_training_cost=True,
+            monitor_training_accuracy=True)
